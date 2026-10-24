@@ -1,0 +1,25 @@
+# Web framework
+fastapi
+uvicorn[standard]
+python-multipart
+
+# Data processing
+pandas
+numpy
+
+# Data validation
+pydantic
+
+# Environment variables
+python-dotenv
+
+# HTTP requests
+httpx
+
+# PDF generation
+reportlab
+
+# AI integration (we'll use one provider)
+# openai
+# anthropic
+# google-genai
