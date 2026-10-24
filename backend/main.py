@@ -1,14 +1,22 @@
 from io import BytesIO
 
 import pandas as pd
+from anthropic import APIConnectionError, APIStatusError, APITimeoutError
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+
+from backend.classifier import classify_columns
+
 
 # Maximum supported upload size: 10 MB
 MAX_FILE_SIZE = 10 * 1024 * 1024
 
 # Number of rows to show in the dataset preview
 PREVIEW_ROWS = 5
+
+# Claude confidence threshold
+CONFIDENCE_THRESHOLD = 0.85
+
 
 # Initialize FastAPI
 app = FastAPI(
@@ -63,16 +71,16 @@ def clean_value(value):
     return value
 
 
-@app.post("/api/analyze")
-async def analyze_csv(file: UploadFile = File(...)):
-    # Validate the filename
+# Validate and parse uploaded CSV files
+async def read_csv_file(file: UploadFile):
+    # Validate filename
     if not file.filename or not file.filename.lower().endswith(".csv"):
         raise HTTPException(
             status_code=400,
             detail="Please upload a valid CSV file.",
         )
 
-    # Read at most 10 MB plus one byte
+    # Read up to 10 MB plus one byte
     contents = await file.read(MAX_FILE_SIZE + 1)
 
     # Reject empty files
@@ -90,10 +98,15 @@ async def analyze_csv(file: UploadFile = File(...)):
         )
 
     try:
-        # Parse the uploaded CSV in memory
+        # Parse CSV in memory
         dataframe = pd.read_csv(BytesIO(contents))
 
-    except (pd.errors.ParserError, pd.errors.EmptyDataError, UnicodeError, ValueError):
+    except (
+        pd.errors.ParserError,
+        pd.errors.EmptyDataError,
+        UnicodeError,
+        ValueError,
+    ):
         raise HTTPException(
             status_code=400,
             detail="Unable to read the CSV file. Check its format.",
@@ -106,6 +119,14 @@ async def analyze_csv(file: UploadFile = File(...)):
             detail="The CSV file does not contain usable data.",
         )
 
+    return dataframe
+
+
+@app.post("/api/analyze")
+async def analyze_csv(file: UploadFile = File(...)):
+    # Parse uploaded CSV
+    dataframe = await read_csv_file(file)
+
     # Calculate dataset dimensions
     total_rows = int(dataframe.shape[0])
     total_columns = int(dataframe.shape[1])
@@ -113,11 +134,10 @@ async def analyze_csv(file: UploadFile = File(...)):
     # Count duplicate rows
     duplicate_rows = int(dataframe.duplicated().sum())
 
-    # Build a profile for each column
+    # Build column profiles
     column_profiles = []
 
     for column_index, column_name in enumerate(dataframe.columns):
-        # Select by position to support repeated column labels
         column_data = dataframe.iloc[:, column_index]
 
         # Calculate missing and unique values
@@ -133,13 +153,13 @@ async def analyze_csv(file: UploadFile = File(...)):
             }
         )
 
-    # Extract the first five rows for preview
+    # Extract first five rows
     preview_rows = []
 
     for row in dataframe.head(PREVIEW_ROWS).itertuples(index=False, name=None):
         preview_rows.append([clean_value(value) for value in row])
 
-    # Return the dataset profile
+    # Return dataset profile
     return {
         "filename": file.filename,
         "rows": total_rows,
@@ -152,4 +172,55 @@ async def analyze_csv(file: UploadFile = File(...)):
             "rows": preview_rows,
         },
         "message": "CSV uploaded and profiled successfully.",
+    }
+
+
+@app.post("/api/classify")
+async def classify_csv(file: UploadFile = File(...)):
+    # Validate and parse the CSV
+    dataframe = await read_csv_file(file)
+
+    try:
+        # Ask Claude to classify the columns
+        result = classify_columns(dataframe)
+
+    except (APIConnectionError, APITimeoutError):
+        raise HTTPException(
+            status_code=503,
+            detail="Unable to connect to Claude. Please try again.",
+        )
+
+    except APIStatusError:
+        raise HTTPException(
+            status_code=502,
+            detail="Claude API request failed. Please try again.",
+        )
+
+    except (ValueError, TypeError):
+        raise HTTPException(
+            status_code=502,
+            detail="Claude returned an invalid classification response.",
+        )
+
+    # Add review status based on confidence
+    classifications = []
+
+    for column in result.columns:
+        needs_review = column.confidence < CONFIDENCE_THRESHOLD
+
+        classifications.append(
+            {
+                "name": column.name,
+                "type": column.type,
+                "confidence": column.confidence,
+                "needs_review": needs_review,
+            }
+        )
+
+    # Return classifications
+    return {
+        "filename": file.filename,
+        "confidence_threshold": CONFIDENCE_THRESHOLD,
+        "columns": classifications,
+        "message": "AI column classification completed successfully.",
     }
