@@ -7,6 +7,9 @@ from fastapi.middleware.cors import CORSMiddleware
 # Maximum supported upload size: 10 MB
 MAX_FILE_SIZE = 10 * 1024 * 1024
 
+# Number of rows to show in the dataset preview
+PREVIEW_ROWS = 5
+
 # Initialize FastAPI
 app = FastAPI(
     title="DataTale API",
@@ -31,6 +34,33 @@ def health_check():
         "status": "healthy",
         "service": "DataTale API",
     }
+
+
+# Convert Pandas data types into readable labels
+def get_column_type(dtype):
+    if pd.api.types.is_bool_dtype(dtype):
+        return "boolean"
+
+    if pd.api.types.is_numeric_dtype(dtype):
+        return "numeric"
+
+    if pd.api.types.is_datetime64_any_dtype(dtype):
+        return "datetime"
+
+    return "text"
+
+
+# Convert values into JSON-safe Python objects
+def clean_value(value):
+    # Represent missing values as JSON null
+    if pd.isna(value):
+        return None
+
+    # Convert Pandas and NumPy scalar types
+    if hasattr(value, "item"):
+        return value.item()
+
+    return value
 
 
 @app.post("/api/analyze")
@@ -60,7 +90,7 @@ async def analyze_csv(file: UploadFile = File(...)):
         )
 
     try:
-        # Convert CSV bytes into a Pandas DataFrame
+        # Parse the uploaded CSV in memory
         dataframe = pd.read_csv(BytesIO(contents))
 
     except (pd.errors.ParserError, pd.errors.EmptyDataError, UnicodeError, ValueError):
@@ -69,18 +99,57 @@ async def analyze_csv(file: UploadFile = File(...)):
             detail="Unable to read the CSV file. Check its format.",
         )
 
-    # Reject datasets without rows or columns
+    # Reject datasets without usable rows or columns
     if dataframe.empty:
         raise HTTPException(
             status_code=400,
             detail="The CSV file does not contain usable data.",
         )
 
-    # Return basic dataset information
+    # Calculate dataset dimensions
+    total_rows = int(dataframe.shape[0])
+    total_columns = int(dataframe.shape[1])
+
+    # Count duplicate rows
+    duplicate_rows = int(dataframe.duplicated().sum())
+
+    # Build a profile for each column
+    column_profiles = []
+
+    for column_index, column_name in enumerate(dataframe.columns):
+        # Select by position to support repeated column labels
+        column_data = dataframe.iloc[:, column_index]
+
+        # Calculate missing and unique values
+        missing_count = int(column_data.isna().sum())
+        unique_count = int(column_data.nunique(dropna=True))
+
+        column_profiles.append(
+            {
+                "name": str(column_name),
+                "data_type": get_column_type(column_data.dtype),
+                "missing_values": missing_count,
+                "unique_values": unique_count,
+            }
+        )
+
+    # Extract the first five rows for preview
+    preview_rows = []
+
+    for row in dataframe.head(PREVIEW_ROWS).itertuples(index=False, name=None):
+        preview_rows.append([clean_value(value) for value in row])
+
+    # Return the dataset profile
     return {
         "filename": file.filename,
-        "rows": int(dataframe.shape[0]),
-        "columns": int(dataframe.shape[1]),
+        "rows": total_rows,
+        "columns": total_columns,
         "column_names": dataframe.columns.tolist(),
-        "message": "CSV uploaded and parsed successfully.",
+        "duplicate_rows": duplicate_rows,
+        "column_profiles": column_profiles,
+        "preview": {
+            "columns": dataframe.columns.tolist(),
+            "rows": preview_rows,
+        },
+        "message": "CSV uploaded and profiled successfully.",
     }
