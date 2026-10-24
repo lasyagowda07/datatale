@@ -1,11 +1,15 @@
+import json
 from io import BytesIO
+from typing import Literal
 
 import pandas as pd
 from anthropic import APIConnectionError, APIStatusError, APITimeoutError
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, ValidationError
 
 from backend.classifier import classify_columns
+from backend.data_statistics import calculate_statistics
 
 
 # Maximum supported upload size: 10 MB
@@ -18,12 +22,24 @@ PREVIEW_ROWS = 5
 CONFIDENCE_THRESHOLD = 0.85
 
 
+# Define the structure of a user-confirmed classification
+class StatisticsClassification(BaseModel):
+    name: str
+    type: Literal["numeric", "categorical", "skip"]
+
+
+# Define the structure of the statistics request
+class StatisticsRequest(BaseModel):
+    classifications: list[StatisticsClassification]
+
+
 # Initialize FastAPI
 app = FastAPI(
     title="DataTale API",
     description="Backend API for AI-powered data storytelling",
     version="1.0.0",
 )
+
 
 # Allow requests from the Next.js frontend
 app.add_middleware(
@@ -73,14 +89,14 @@ def clean_value(value):
 
 # Validate and parse uploaded CSV files
 async def read_csv_file(file: UploadFile):
-    # Validate filename
+    # Validate the filename
     if not file.filename or not file.filename.lower().endswith(".csv"):
         raise HTTPException(
             status_code=400,
             detail="Please upload a valid CSV file.",
         )
 
-    # Read up to 10 MB plus one byte
+    # Read at most 10 MB plus one byte
     contents = await file.read(MAX_FILE_SIZE + 1)
 
     # Reject empty files
@@ -98,7 +114,7 @@ async def read_csv_file(file: UploadFile):
         )
 
     try:
-        # Parse CSV in memory
+        # Parse the uploaded CSV in memory
         dataframe = pd.read_csv(BytesIO(contents))
 
     except (
@@ -124,7 +140,7 @@ async def read_csv_file(file: UploadFile):
 
 @app.post("/api/analyze")
 async def analyze_csv(file: UploadFile = File(...)):
-    # Parse uploaded CSV
+    # Parse the uploaded CSV
     dataframe = await read_csv_file(file)
 
     # Calculate dataset dimensions
@@ -134,10 +150,11 @@ async def analyze_csv(file: UploadFile = File(...)):
     # Count duplicate rows
     duplicate_rows = int(dataframe.duplicated().sum())
 
-    # Build column profiles
+    # Build a profile for each column
     column_profiles = []
 
     for column_index, column_name in enumerate(dataframe.columns):
+        # Select the column by position
         column_data = dataframe.iloc[:, column_index]
 
         # Calculate missing and unique values
@@ -153,13 +170,18 @@ async def analyze_csv(file: UploadFile = File(...)):
             }
         )
 
-    # Extract first five rows
+    # Extract the first five rows for preview
     preview_rows = []
 
-    for row in dataframe.head(PREVIEW_ROWS).itertuples(index=False, name=None):
-        preview_rows.append([clean_value(value) for value in row])
+    for row in dataframe.head(PREVIEW_ROWS).itertuples(
+        index=False,
+        name=None,
+    ):
+        preview_rows.append(
+            [clean_value(value) for value in row]
+        )
 
-    # Return dataset profile
+    # Return the dataset profile
     return {
         "filename": file.filename,
         "rows": total_rows,
@@ -196,7 +218,7 @@ async def classify_csv(file: UploadFile = File(...)):
             detail="Claude API request failed. Please try again.",
         )
 
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, ValidationError):
         raise HTTPException(
             status_code=502,
             detail="Claude returned an invalid classification response.",
@@ -217,10 +239,64 @@ async def classify_csv(file: UploadFile = File(...)):
             }
         )
 
-    # Return classifications
+    # Return AI classifications
     return {
         "filename": file.filename,
         "confidence_threshold": CONFIDENCE_THRESHOLD,
         "columns": classifications,
         "message": "AI column classification completed successfully.",
     }
+
+
+@app.post("/api/statistics")
+async def calculate_dataset_statistics(
+    file: UploadFile = File(...),
+    classifications: str = Form(...),
+):
+    # Validate and parse the uploaded CSV
+    dataframe = await read_csv_file(file)
+
+    try:
+        # Convert the JSON form field into a Python object
+        submitted_data = json.loads(classifications)
+
+        # Validate the submitted classifications using Pydantic
+        request = StatisticsRequest(
+            classifications=submitted_data
+        )
+
+        # Convert validated classifications into dictionaries
+        confirmed_classifications = [
+            column.model_dump()
+            for column in request.classifications
+        ]
+
+        # Calculate statistics using the confirmed classifications
+        result = calculate_statistics(
+            dataframe,
+            confirmed_classifications,
+        )
+
+    except json.JSONDecodeError:
+        raise HTTPException(
+            status_code=400,
+            detail="Classifications must contain valid JSON.",
+        )
+
+    except ValidationError:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Invalid classifications. Each column must have "
+                "a name and a type: numeric, categorical, or skip."
+            ),
+        )
+
+    except (ValueError, TypeError, KeyError) as error:
+        raise HTTPException(
+            status_code=400,
+            detail=str(error),
+        )
+
+    # Return the calculated statistics
+    return result
