@@ -10,6 +10,7 @@ from pydantic import BaseModel, ValidationError
 
 from backend.classifier import classify_columns
 from backend.data_statistics import calculate_statistics
+from backend.storyteller import generate_insights
 
 
 # Maximum supported upload size: 10 MB
@@ -218,10 +219,12 @@ async def classify_csv(file: UploadFile = File(...)):
             detail="Claude API request failed. Please try again.",
         )
 
-    except (ValueError, TypeError, ValidationError):
+    except (ValueError, TypeError, ValidationError) as error:
+        print("INSIGHT VALIDATION ERROR:", repr(error))
+
         raise HTTPException(
             status_code=502,
-            detail="Claude returned an invalid classification response.",
+            detail="Claude returned insights that could not be validated.",
         )
 
     # Add review status based on confidence
@@ -248,34 +251,22 @@ async def classify_csv(file: UploadFile = File(...)):
     }
 
 
-@app.post("/api/statistics")
-async def calculate_dataset_statistics(
-    file: UploadFile = File(...),
-    classifications: str = Form(...),
-):
-    # Validate and parse the uploaded CSV
-    dataframe = await read_csv_file(file)
-
+# Parse and validate the user-confirmed classifications
+def parse_classifications(classifications: str):
     try:
-        # Convert the JSON form field into a Python object
+        # Convert the JSON string into a Python object
         submitted_data = json.loads(classifications)
 
-        # Validate the submitted classifications using Pydantic
+        # Validate the classifications using Pydantic
         request = StatisticsRequest(
             classifications=submitted_data
         )
 
-        # Convert validated classifications into dictionaries
-        confirmed_classifications = [
+        # Convert validated models into dictionaries
+        return [
             column.model_dump()
             for column in request.classifications
         ]
-
-        # Calculate statistics using the confirmed classifications
-        result = calculate_statistics(
-            dataframe,
-            confirmed_classifications,
-        )
 
     except json.JSONDecodeError:
         raise HTTPException(
@@ -292,11 +283,117 @@ async def calculate_dataset_statistics(
             ),
         )
 
+
+@app.post("/api/statistics")
+async def calculate_dataset_statistics(
+    file: UploadFile = File(...),
+    classifications: str = Form(...),
+):
+    # Validate and parse the uploaded CSV
+    dataframe = await read_csv_file(file)
+
+    # Validate the confirmed classifications
+    confirmed_classifications = parse_classifications(
+        classifications
+    )
+
+    try:
+        # Calculate statistics using Pandas
+        result = calculate_statistics(
+            dataframe,
+            confirmed_classifications,
+        )
+
     except (ValueError, TypeError, KeyError) as error:
         raise HTTPException(
             status_code=400,
             detail=str(error),
         )
 
-    # Return the calculated statistics
     return result
+
+
+@app.post("/api/insights")
+async def generate_dataset_insights(
+    file: UploadFile = File(...),
+    classifications: str = Form(...),
+):
+    """
+    Generate AI insights from a CSV dataset.
+
+    Pipeline:
+    CSV → Pandas Statistics → Claude → Evidence Validation
+    """
+
+    # Step 1: Read and validate the CSV
+    dataframe = await read_csv_file(file)
+
+    # Step 2: Validate user-confirmed classifications
+    confirmed_classifications = parse_classifications(
+        classifications
+    )
+
+    # Step 3: Calculate statistics
+    try:
+        statistics = calculate_statistics(
+            dataframe,
+            confirmed_classifications,
+        )
+
+    except (ValueError, TypeError, KeyError) as error:
+        raise HTTPException(
+            status_code=400,
+            detail=str(error),
+        )
+
+    # Ensure at least one column was analyzed
+    if not statistics.get("results"):
+        raise HTTPException(
+            status_code=400,
+            detail="At least one column must be analyzed to generate insights.",
+        )
+
+    # Step 4: Generate insights using Claude
+    try:
+        insights = generate_insights(statistics)
+
+    except (APIConnectionError, APITimeoutError):
+        raise HTTPException(
+            status_code=503,
+            detail="Unable to connect to Claude. Please try again.",
+        )
+
+    except (
+        json.JSONDecodeError,
+        ValidationError,
+        ValueError,
+        TypeError,
+        KeyError,
+    ) as error:
+        # Print the actual error for debugging
+        print(f"Insight validation failed: {type(error).__name__}: {error}")
+
+        raise HTTPException(
+            status_code=502,
+            detail="Claude returned insights that could not be validated.",
+        )
+
+    except (
+        json.JSONDecodeError,
+        ValidationError,
+        ValueError,
+        TypeError,
+        KeyError,
+    ):
+        raise HTTPException(
+            status_code=502,
+            detail="Claude returned insights that could not be validated.",
+        )
+
+    # Step 5: Return validated insights
+    return {
+        "filename": file.filename,
+        "statistics": statistics,
+        "storytelling": insights.model_dump(),
+        "message": "AI insights generated successfully.",
+    }

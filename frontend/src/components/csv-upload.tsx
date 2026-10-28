@@ -19,6 +19,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import AiInsights from "@/components/ai-insights";
 
 // Maximum upload size: 10 MB
 const MAX_FILE_SIZE = 10 * 1024 * 1024;
@@ -167,6 +168,9 @@ export default function CsvUpload() {
   );
   const [isCalculating, setIsCalculating] = useState(false);
   const [statisticsError, setStatisticsError] = useState("");
+
+  // Track successful statistics calculations to reset stale AI insights
+  const [statisticsVersion, setStatisticsVersion] = useState(0);
 
   // Prevent file changes while requests are running
   const isBusy = isAnalyzing || isClassifying || isCalculating;
@@ -443,6 +447,9 @@ export default function CsvUpload() {
       }
 
       setStatistics(data as StatisticsResponse);
+
+      // Reset AI insights whenever statistics are recalculated
+      setStatisticsVersion((previous) => previous + 1);
     } catch (caughtError) {
       setStatisticsError(
         caughtError instanceof Error
@@ -1253,6 +1260,22 @@ export default function CsvUpload() {
               </CardContent>
             </Card>
           )}
+
+          {/* AI Insights & Storytelling */}
+          {statistics &&
+            statistics.results.length > 0 &&
+            file &&
+            isConfirmed && (
+              <AiInsights
+                key={`${file.name}-${file.size}-${statisticsVersion}`}
+                file={file}
+                classifications={classifications.map((column) => ({
+                  name: column.name,
+                  type: column.type,
+                }))}
+                disabled={isBusy}
+              />
+            )}
         </div>
       )}
     </div>
