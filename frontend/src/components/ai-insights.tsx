@@ -10,11 +10,18 @@ import {
   ChevronDown,
   ChevronUp,
   BookOpen,
+  Download,
+  FileText,
+  CheckCircle2,
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+
+// --------------------------------------------------
+// Types
+// --------------------------------------------------
 
 // User-confirmed column classifications
 type ColumnType = "numeric" | "categorical" | "skip";
@@ -62,6 +69,10 @@ type AiInsightsProps = {
   disabled?: boolean;
 };
 
+// --------------------------------------------------
+// Helpers
+// --------------------------------------------------
+
 // Extract readable FastAPI errors
 function getApiError(data: unknown, fallback: string) {
   if (
@@ -76,40 +87,87 @@ function getApiError(data: unknown, fallback: string) {
   return fallback;
 }
 
-// Severity badge styles
+// Extract error details from an unsuccessful response
+async function getResponseError(
+  response: Response,
+  fallback: string
+): Promise<string> {
+  try {
+    const data: unknown = await response.json();
+
+    return getApiError(data, fallback);
+  } catch {
+    return fallback;
+  }
+}
+
+// Generate a safe PDF filename
+function getReportFilename(filename: string) {
+  const nameWithoutExtension = filename.replace(/\.csv$/i, "");
+
+  const safeName = nameWithoutExtension
+    .replace(/[^a-zA-Z0-9_-]/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_+|_+$/g, "");
+
+  return `${safeName || "dataset"}_DataTale_Report.pdf`;
+}
+
+// --------------------------------------------------
+// Severity configuration
+// --------------------------------------------------
+
 const SEVERITY_STYLES = {
   info: "border-blue-200 bg-blue-50 text-blue-700",
   interesting: "border-purple-200 bg-purple-50 text-purple-700",
   warning: "border-amber-200 bg-amber-50 text-amber-800",
 };
 
-// Icons for each insight severity
 const SEVERITY_ICONS = {
   info: Info,
   interesting: Lightbulb,
   warning: AlertTriangle,
 };
 
+// --------------------------------------------------
+// Main component
+// --------------------------------------------------
+
 export default function AiInsights({
   file,
   classifications,
   disabled = false,
 }: AiInsightsProps) {
+  // AI insights state
   const [insights, setInsights] = useState<InsightResponse | null>(null);
+
+  // Loading states
   const [isGenerating, setIsGenerating] = useState(false);
+  const [isDownloading, setIsDownloading] = useState(false);
+
+  // Error states
   const [error, setError] = useState("");
+  const [downloadError, setDownloadError] = useState("");
+
+  // Download success state
+  const [downloadSuccess, setDownloadSuccess] = useState(false);
 
   // Track which insight cards have expanded evidence
   const [expandedInsights, setExpandedInsights] = useState<number[]>([]);
 
-  // Request AI insights from FastAPI
+  // --------------------------------------------------
+  // Generate AI insights
+  // --------------------------------------------------
+
   async function generateInsights() {
-    if (isGenerating || disabled) return;
+    if (isGenerating || isDownloading || disabled) return;
 
     setIsGenerating(true);
     setError("");
     setInsights(null);
     setExpandedInsights([]);
+    setDownloadError("");
+    setDownloadSuccess(false);
 
     try {
       const apiUrl = process.env.NEXT_PUBLIC_API_URL;
@@ -118,31 +176,35 @@ export default function AiInsights({
         throw new Error("Backend API URL is not configured.");
       }
 
-      // Upload the CSV again for server-side statistical calculations
+      // Prepare CSV upload
       const formData = new FormData();
+
       formData.append("file", file);
 
-      // Send only confirmed column names and types
+      // Send user-confirmed classifications
       formData.append(
         "classifications",
         JSON.stringify(classifications)
       );
 
+      // Request insights from FastAPI
       const response = await fetch(`${apiUrl}/api/insights`, {
         method: "POST",
         body: formData,
       });
 
-      const data: unknown = await response.json();
-
       if (!response.ok) {
         throw new Error(
-          getApiError(data, "Unable to generate AI insights.")
+          await getResponseError(
+            response,
+            "Unable to generate AI insights."
+          )
         );
       }
 
-      const result = data as InsightsApiResponse;
+      const result: InsightsApiResponse = await response.json();
 
+      // Store Claude's insights in React state
       setInsights(result.storytelling);
     } catch (caughtError) {
       setError(
@@ -155,7 +217,121 @@ export default function AiInsights({
     }
   }
 
-  // Expand or collapse supporting evidence
+  // --------------------------------------------------
+  // Download PDF report
+  // --------------------------------------------------
+
+  async function downloadPdfReport() {
+    // Require generated insights before downloading
+    if (
+      !insights ||
+      isDownloading ||
+      isGenerating ||
+      disabled
+    ) {
+      return;
+    }
+
+    setIsDownloading(true);
+    setDownloadError("");
+    setDownloadSuccess(false);
+
+    try {
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL;
+
+      if (!apiUrl) {
+        throw new Error("Backend API URL is not configured.");
+      }
+
+      // Prepare the report request
+      const formData = new FormData();
+
+      // Include the original CSV
+      formData.append("file", file);
+
+      // Include user-confirmed classifications
+      formData.append(
+        "classifications",
+        JSON.stringify(classifications)
+      );
+
+      // Reuse existing Claude insights
+      // No additional Claude API request is needed
+      formData.append(
+        "insights",
+        JSON.stringify(insights)
+      );
+
+      // Request the PDF from FastAPI
+      const response = await fetch(`${apiUrl}/api/report`, {
+        method: "POST",
+        body: formData,
+      });
+
+      // Handle backend errors
+      if (!response.ok) {
+        throw new Error(
+          await getResponseError(
+            response,
+            "Unable to generate the PDF report."
+          )
+        );
+      }
+
+      // Verify the backend returned a PDF
+      const contentType = response.headers.get("content-type");
+
+      if (!contentType?.includes("application/pdf")) {
+        throw new Error(
+          "The server did not return a valid PDF response."
+        );
+      }
+
+      // Convert the response into a downloadable file
+      const pdfBlob = await response.blob();
+
+      if (pdfBlob.size === 0) {
+        throw new Error("The generated PDF is empty.");
+      }
+
+      // Create a temporary browser URL
+      const downloadUrl = URL.createObjectURL(pdfBlob);
+
+      // Create an invisible download link
+      const downloadLink = document.createElement("a");
+
+      downloadLink.href = downloadUrl;
+      downloadLink.download = getReportFilename(file.name);
+
+      document.body.appendChild(downloadLink);
+
+      // Trigger the browser download
+      downloadLink.click();
+
+      // Clean up temporary resources
+      downloadLink.remove();
+
+      // Release the object URL after the browser starts the download
+      window.setTimeout(() => {
+        URL.revokeObjectURL(downloadUrl);
+      }, 1000);
+
+      setDownloadSuccess(true);
+    } catch (caughtError) {
+      setDownloadError(
+        caughtError instanceof Error
+          ? caughtError.message
+          : "Something went wrong while downloading the PDF."
+      );
+    } finally {
+      setIsDownloading(false);
+    }
+  }
+
+  // --------------------------------------------------
+  // Expand or collapse evidence
+  // --------------------------------------------------
+
   function toggleEvidence(index: number) {
     setExpandedInsights((previous) =>
       previous.includes(index)
@@ -163,6 +339,10 @@ export default function AiInsights({
         : [...previous, index]
     );
   }
+
+  // --------------------------------------------------
+  // UI
+  // --------------------------------------------------
 
   return (
     <Card className="border-slate-200 bg-white shadow-sm">
@@ -184,10 +364,11 @@ export default function AiInsights({
             </p>
           </div>
 
+          {/* Generate Insights Button */}
           <Button
             type="button"
             onClick={generateInsights}
-            disabled={isGenerating || disabled}
+            disabled={isGenerating || isDownloading || disabled}
           >
             {isGenerating ? (
               <>
@@ -197,13 +378,19 @@ export default function AiInsights({
             ) : (
               <>
                 <Sparkles className="mr-2 h-4 w-4" />
-                {insights ? "Regenerate Insights" : "Generate AI Insights"}
+
+                {insights
+                  ? "Regenerate Insights"
+                  : "Generate AI Insights"}
               </>
             )}
           </Button>
         </div>
 
-        {/* Initial State */}
+        {/* --------------------------------------------------
+            Initial State
+        -------------------------------------------------- */}
+
         {!insights && !isGenerating && !error && (
           <div className="rounded-xl bg-purple-50 p-6 text-center">
             <Sparkles className="mx-auto mb-3 h-6 w-6 text-purple-500" />
@@ -219,7 +406,10 @@ export default function AiInsights({
           </div>
         )}
 
-        {/* Loading State */}
+        {/* --------------------------------------------------
+            Loading State
+        -------------------------------------------------- */}
+
         {isGenerating && (
           <div
             role="status"
@@ -238,7 +428,10 @@ export default function AiInsights({
           </div>
         )}
 
-        {/* API Error */}
+        {/* --------------------------------------------------
+            AI Error
+        -------------------------------------------------- */}
+
         {error && (
           <div
             role="alert"
@@ -248,7 +441,10 @@ export default function AiInsights({
           </div>
         )}
 
-        {/* Generated Results */}
+        {/* --------------------------------------------------
+            Generated Insights
+        -------------------------------------------------- */}
+
         {insights && (
           <div className="space-y-6">
             {/* Dataset Summary */}
@@ -274,6 +470,7 @@ export default function AiInsights({
 
               {insights.insights.map((insight, index) => {
                 const SeverityIcon = SEVERITY_ICONS[insight.severity];
+
                 const isExpanded = expandedInsights.includes(index);
 
                 return (
@@ -362,24 +559,26 @@ export default function AiInsights({
                           </thead>
 
                           <tbody>
-                            {insight.evidence.map((evidence, evidenceIndex) => (
-                              <tr
-                                key={evidenceIndex}
-                                className="border-t border-slate-100"
-                              >
-                                <td className="break-words px-4 py-3 text-slate-900">
-                                  {evidence.column}
-                                </td>
+                            {insight.evidence.map(
+                              (evidence, evidenceIndex) => (
+                                <tr
+                                  key={evidenceIndex}
+                                  className="border-t border-slate-100"
+                                >
+                                  <td className="break-words px-4 py-3 text-slate-900">
+                                    {evidence.column}
+                                  </td>
 
-                                <td className="break-words px-4 py-3 text-slate-600">
-                                  {evidence.metric}
-                                </td>
+                                  <td className="break-words px-4 py-3 text-slate-600">
+                                    {evidence.metric}
+                                  </td>
 
-                                <td className="break-words px-4 py-3 font-medium text-slate-900">
-                                  {evidence.value}
-                                </td>
-                              </tr>
-                            ))}
+                                  <td className="break-words px-4 py-3 font-medium text-slate-900">
+                                    {evidence.value}
+                                  </td>
+                                </tr>
+                              )
+                            )}
                           </tbody>
                         </table>
                       </div>
@@ -416,6 +615,79 @@ export default function AiInsights({
                 </ul>
               </div>
             )}
+
+            {/* --------------------------------------------------
+                PDF Report Download Section
+            -------------------------------------------------- */}
+
+            <div className="rounded-xl border border-blue-200 bg-gradient-to-br from-blue-50 to-white p-6">
+              <div className="flex flex-col gap-5 sm:flex-row sm:items-center sm:justify-between">
+                {/* Report Information */}
+                <div className="flex items-start gap-3">
+                  <div className="rounded-xl bg-blue-100 p-3">
+                    <FileText className="h-6 w-6 text-blue-600" />
+                  </div>
+
+                  <div>
+                    <h3 className="font-semibold text-slate-900">
+                      Your DataTale Report Is Ready
+                    </h3>
+
+                    <p className="mt-2 max-w-lg text-sm leading-6 text-slate-600">
+                      Download a complete PDF containing your dataset
+                      overview, statistical analysis, visualizations,
+                      and AI-generated insights.
+                    </p>
+
+                    <p className="mt-2 text-xs text-slate-500">
+                      Includes charts, supporting evidence, and
+                      important limitations.
+                    </p>
+                  </div>
+                </div>
+
+                {/* Download Button */}
+                <Button
+                  type="button"
+                  onClick={downloadPdfReport}
+                  disabled={isDownloading || isGenerating || disabled}
+                  className="shrink-0"
+                >
+                  {isDownloading ? (
+                    <>
+                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                      Preparing PDF...
+                    </>
+                  ) : (
+                    <>
+                      <Download className="mr-2 h-4 w-4" />
+                      Download PDF Report
+                    </>
+                  )}
+                </Button>
+              </div>
+
+              {/* Download Error */}
+              {downloadError && (
+                <div
+                  role="alert"
+                  className="mt-4 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700"
+                >
+                  {downloadError}
+                </div>
+              )}
+
+              {/* Download Success */}
+              {downloadSuccess && !downloadError && (
+                <div
+                  role="status"
+                  className="mt-4 flex items-center gap-2 text-sm text-green-700"
+                >
+                  <CheckCircle2 className="h-4 w-4" />
+                  Your PDF download has started.
+                </div>
+              )}
+            </div>
           </div>
         )}
       </CardContent>

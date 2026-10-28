@@ -20,6 +20,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import AiInsights from "@/components/ai-insights";
+import DataVisualizations from "@/components/data-visualizations";
 
 // Maximum upload size: 10 MB
 const MAX_FILE_SIZE = 10 * 1024 * 1024;
@@ -74,6 +75,27 @@ type NumericStatistics = {
   p75: number | null;
 };
 
+// Histogram bins returned by NumPy
+type HistogramBin = {
+  start: number;
+  end: number;
+  count: number;
+};
+
+// Box plot statistics returned by Pandas
+type BoxplotStatistics = {
+  min: number;
+  q1: number;
+  median: number;
+  q3: number;
+  max: number;
+  iqr: number;
+  lower_whisker: number;
+  upper_whisker: number;
+  outlier_count: number;
+  outliers: number[];
+};
+
 // Frequency distribution for categorical columns
 type CategoryFrequency = {
   value: string;
@@ -88,6 +110,8 @@ type NumericResult = {
   count: number;
   missing_values: number;
   statistics: NumericStatistics | null;
+  histogram: HistogramBin[];
+  boxplot: BoxplotStatistics | null;
 };
 
 type CategoricalResult = {
@@ -110,12 +134,12 @@ type StatisticsResponse = {
 
 // Explain what DataTale will calculate for each classification
 const ANALYSIS_DESCRIPTIONS: Record<ColumnType, string> = {
-  numeric: "Mean, median, min, max, standard deviation",
+  numeric: "Descriptive statistics, histogram, and box plot",
   categorical: "Category counts and percentages",
   skip: "Excluded from statistical analysis",
 };
 
-// Format numbers for display without changing the calculations
+// Format numbers for display without changing calculations
 function formatStatistic(value: number | null | undefined) {
   if (value === null || value === undefined) {
     return "N/A";
@@ -169,7 +193,7 @@ export default function CsvUpload() {
   const [isCalculating, setIsCalculating] = useState(false);
   const [statisticsError, setStatisticsError] = useState("");
 
-  // Track successful statistics calculations to reset stale AI insights
+  // Reset visualizations and AI insights after recalculation
   const [statisticsVersion, setStatisticsVersion] = useState(0);
 
   // Prevent file changes while requests are running
@@ -333,7 +357,7 @@ export default function CsvUpload() {
 
       const result = data as ClassificationResponse;
 
-      // Verify that Claude returned every dataset column
+      // Verify Claude returned every dataset column
       const expectedNames = analysis.column_names;
       const returnedNames = result.columns.map(
         (column) => column.name
@@ -393,7 +417,7 @@ export default function CsvUpload() {
     resetStatistics();
   }
 
-  // Calculate statistics using the confirmed classifications
+  // Calculate statistics using confirmed classifications
   async function calculateDatasetStatistics() {
     if (
       !file ||
@@ -419,7 +443,7 @@ export default function CsvUpload() {
       // Include the original CSV in the request
       const formData = createFormData(file);
 
-      // Send only the confirmed names and types
+      // Send only confirmed names and types
       const confirmedClassifications = classifications.map(
         (column) => ({
           name: column.name,
@@ -446,9 +470,10 @@ export default function CsvUpload() {
         );
       }
 
+
       setStatistics(data as StatisticsResponse);
 
-      // Reset AI insights whenever statistics are recalculated
+      // Reset charts and AI insights after recalculation
       setStatisticsVersion((previous) => previous + 1);
     } catch (caughtError) {
       setStatisticsError(
@@ -461,14 +486,14 @@ export default function CsvUpload() {
     }
   }
 
-  // Identify low-confidence columns that still need review
+  // Identify low-confidence columns needing review
   const pendingReview = classifications.filter(
     (column) =>
       column.needs_review &&
       !reviewedColumns.includes(column.name)
   );
 
-  // Calculate total missing values from the dataset profile
+  // Calculate total missing values from dataset profile
   const totalMissingValues =
     analysis?.column_profiles.reduce(
       (total, column) => total + column.missing_values,
@@ -1259,6 +1284,14 @@ export default function CsvUpload() {
                 </div>
               </CardContent>
             </Card>
+          )}
+
+          {/* Interactive Data Visualizations */}
+          {statistics && statistics.results.length > 0 && (
+            <DataVisualizations
+              key={statisticsVersion}
+              statistics={statistics}
+            />
           )}
 
           {/* AI Insights & Storytelling */}

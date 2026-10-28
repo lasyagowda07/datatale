@@ -89,8 +89,8 @@ data/temp/
 # Generated Reports
 # ==========================================
 
-reports/
 generated_reports/
+data/reports/
 
 # ==========================================
 # Jupyter Notebooks

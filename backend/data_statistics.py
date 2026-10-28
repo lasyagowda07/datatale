@@ -1,23 +1,169 @@
 import math
 
+import numpy as np
 import pandas as pd
+
+
+# Maximum number of histogram bins
+MAX_HISTOGRAM_BINS = 20
+
+# Number of bins for smaller datasets
+DEFAULT_HISTOGRAM_BINS = 10
+
+
+def clean_number(value):
+    """Convert numeric values into JSON-safe Python numbers."""
+
+    if value is None:
+        return None
+
+    number = float(value)
+
+    if not math.isfinite(number):
+        return None
+
+    return number
+
+
+def calculate_histogram(valid_values: pd.Series):
+    """
+    Calculate histogram bins using actual numeric values.
+
+    Each bin contains:
+    - start: lower boundary
+    - end: upper boundary
+    - count: number of observations
+    """
+
+    # Convert Pandas values into a NumPy array
+    values = valid_values.to_numpy(dtype=float)
+
+    # Handle empty numeric columns
+    if len(values) == 0:
+        return []
+
+    # Handle columns where every value is identical
+    if np.min(values) == np.max(values):
+        value = float(values[0])
+
+        return [
+            {
+                "start": value,
+                "end": value,
+                "count": int(len(values)),
+            }
+        ]
+
+    # Choose a reasonable number of bins
+    bin_count = min(
+        DEFAULT_HISTOGRAM_BINS,
+        max(1, int(math.sqrt(len(values)))),
+        MAX_HISTOGRAM_BINS,
+    )
+
+    # Calculate histogram frequencies
+    counts, bin_edges = np.histogram(
+        values,
+        bins=bin_count,
+    )
+
+    # Build the histogram response
+    histogram = []
+
+    for index, count in enumerate(counts):
+        histogram.append(
+            {
+                "start": clean_number(bin_edges[index]),
+                "end": clean_number(bin_edges[index + 1]),
+                "count": int(count),
+            }
+        )
+
+    return histogram
+
+
+def calculate_boxplot(valid_values: pd.Series):
+    """
+    Calculate box plot statistics using the 1.5 × IQR rule.
+
+    Whiskers extend to actual observations within the fences.
+    Values outside the fences are potential outliers.
+    """
+
+    # Handle empty numeric columns
+    if valid_values.empty:
+        return None
+
+    # Calculate quartiles
+    q1 = float(valid_values.quantile(0.25))
+    median = float(valid_values.median())
+    q3 = float(valid_values.quantile(0.75))
+
+    # Calculate the interquartile range
+    iqr = q3 - q1
+
+    # Calculate outlier boundaries
+    lower_fence = q1 - 1.5 * iqr
+    upper_fence = q3 + 1.5 * iqr
+
+    # Identify potential outliers
+    outlier_mask = (
+        (valid_values < lower_fence)
+        | (valid_values > upper_fence)
+    )
+
+    outliers = valid_values[outlier_mask]
+
+    # Keep only observations within the fences
+    non_outliers = valid_values[~outlier_mask]
+
+    # Find actual whisker endpoints
+    lower_whisker = float(non_outliers.min())
+    upper_whisker = float(non_outliers.max())
+
+    # Return box plot statistics
+    return {
+        "min": clean_number(valid_values.min()),
+        "q1": clean_number(q1),
+        "median": clean_number(median),
+        "q3": clean_number(q3),
+        "max": clean_number(valid_values.max()),
+        "iqr": clean_number(iqr),
+        "lower_whisker": clean_number(lower_whisker),
+        "upper_whisker": clean_number(upper_whisker),
+        "outlier_count": int(len(outliers)),
+        "outliers": [
+            clean_number(value)
+            for value in outliers.tolist()
+        ],
+    }
 
 
 def calculate_statistics(dataframe: pd.DataFrame, classifications: list):
     """
     Calculate statistics using user-confirmed column classifications.
 
-    Numeric columns receive descriptive statistics.
-    Categorical columns receive frequency distributions.
+    Numeric columns receive:
+    - Descriptive statistics
+    - Histogram bins
+    - Box plot statistics
+
+    Categorical columns receive:
+    - Frequency distributions
+
     Skipped columns are excluded.
     """
 
-    # Store the results for all analyzed columns
+    # Store results for all analyzed columns
     results = []
 
     # Ensure classifications match the dataset exactly
     expected_columns = list(dataframe.columns)
-    classified_columns = [item["name"] for item in classifications]
+
+    classified_columns = [
+        item["name"]
+        for item in classifications
+    ]
 
     if (
         len(classified_columns) != len(expected_columns)
@@ -27,7 +173,7 @@ def calculate_statistics(dataframe: pd.DataFrame, classifications: list):
             "Classifications must contain every dataset column exactly once."
         )
 
-    # Process columns in the supplied classification order
+    # Process columns in classification order
     for classification in classifications:
         column_name = classification["name"]
         column_type = classification["type"]
@@ -38,20 +184,27 @@ def calculate_statistics(dataframe: pd.DataFrame, classifications: list):
                 f"Invalid classification type for '{column_name}'."
             )
 
-        # Skip identifiers and excluded columns
+        # Skip excluded columns
         if column_type == "skip":
             continue
 
-        # Select the column
+        # Select the dataset column
         series = dataframe[column_name]
 
-        # Calculate numeric statistics
+        # Numeric statistics
         if column_type == "numeric":
+
             # Convert numeric-looking values into numbers
-            numeric_series = pd.to_numeric(series, errors="coerce")
+            numeric_series = pd.to_numeric(
+                series,
+                errors="coerce",
+            )
 
             # Reject nonmissing values that cannot be converted
-            invalid_values = series.notna() & numeric_series.isna()
+            invalid_values = (
+                series.notna()
+                & numeric_series.isna()
+            )
 
             if invalid_values.any():
                 raise ValueError(
@@ -71,31 +224,38 @@ def calculate_statistics(dataframe: pd.DataFrame, classifications: list):
                         "count": 0,
                         "missing_values": int(series.isna().sum()),
                         "statistics": None,
+                        "histogram": [],
+                        "boxplot": None,
                     }
                 )
                 continue
 
             # Calculate descriptive statistics
             statistics = {
-                "mean": float(valid_values.mean()),
-                "median": float(valid_values.median()),
-                "min": float(valid_values.min()),
-                "max": float(valid_values.max()),
+                "mean": clean_number(valid_values.mean()),
+                "median": clean_number(valid_values.median()),
+                "min": clean_number(valid_values.min()),
+                "max": clean_number(valid_values.max()),
                 "std": (
-                    float(valid_values.std())
+                    clean_number(valid_values.std())
                     if len(valid_values) > 1
                     else None
                 ),
-                "p25": float(valid_values.quantile(0.25)),
-                "p75": float(valid_values.quantile(0.75)),
+                "p25": clean_number(
+                    valid_values.quantile(0.25)
+                ),
+                "p75": clean_number(
+                    valid_values.quantile(0.75)
+                ),
             }
 
-            # Replace non-finite results with null
-            statistics = {
-                key: value if math.isfinite(value) else None
-                for key, value in statistics.items()
-            }
+            # Calculate histogram bins
+            histogram = calculate_histogram(valid_values)
 
+            # Calculate box plot statistics
+            boxplot = calculate_boxplot(valid_values)
+
+            # Add numeric results
             results.append(
                 {
                     "name": column_name,
@@ -103,18 +263,21 @@ def calculate_statistics(dataframe: pd.DataFrame, classifications: list):
                     "count": int(len(valid_values)),
                     "missing_values": int(series.isna().sum()),
                     "statistics": statistics,
+                    "histogram": histogram,
+                    "boxplot": boxplot,
                 }
             )
 
-        # Calculate categorical statistics
+        # Categorical statistics
         elif column_type == "categorical":
+
             # Remove missing values
             valid_values = series.dropna()
 
             # Count category occurrences
             counts = valid_values.value_counts()
 
-            # Calculate percentages from nonmissing values
+            # Calculate percentages
             total = len(valid_values)
 
             frequencies = []
@@ -125,18 +288,22 @@ def calculate_statistics(dataframe: pd.DataFrame, classifications: list):
                         "value": str(value),
                         "count": int(count),
                         "percentage": round(
-                            (count / total) * 100, 2
+                            (count / total) * 100,
+                            2,
                         ),
                     }
                 )
 
+            # Add categorical results
             results.append(
                 {
                     "name": column_name,
                     "type": "categorical",
                     "count": int(total),
                     "missing_values": int(series.isna().sum()),
-                    "unique_categories": int(valid_values.nunique()),
+                    "unique_categories": int(
+                        valid_values.nunique()
+                    ),
                     "mode": (
                         str(counts.index[0])
                         if not counts.empty
@@ -146,6 +313,7 @@ def calculate_statistics(dataframe: pd.DataFrame, classifications: list):
                 }
             )
 
+    # Return the complete statistics response
     return {
         "total_rows": int(len(dataframe)),
         "analyzed_columns": len(results),

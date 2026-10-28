@@ -1,25 +1,44 @@
-# Web framework
-fastapi
-uvicorn[standard]
-python-multipart
+# ==========================================
+# FastAPI Backend
+# ==========================================
 
-# Data processing
-pandas
-numpy
+fastapi==0.162.0
+uvicorn==0.54.0
+python-multipart==0.0.32
 
-# Data validation
-pydantic
+# ==========================================
+# Data Processing
+# ==========================================
 
-# Environment variables
-python-dotenv
+pandas==3.1.0
+numpy==2.5.4
 
-# HTTP requests
-httpx
+# ==========================================
+# AI Integration
+# ==========================================
 
-# PDF generation
-reportlab
+anthropic==2.3.0
 
-# AI integration (we'll use one provider)
-# openai
-# anthropic
-# google-genai
+# ==========================================
+# Validation
+# ==========================================
+
+pydantic==2.14.1
+
+# ==========================================
+# Environment Configuration
+# ==========================================
+
+python-dotenv==1.2.4
+
+# ==========================================
+# PDF Generation
+# ==========================================
+
+reportlab==5.1.0
+
+# ==========================================
+# Charts
+# ==========================================
+
+matplotlib==3.11.2
