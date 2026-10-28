@@ -1,4 +1,5 @@
 import json
+import os
 from io import BytesIO
 from typing import Literal
 
@@ -9,6 +10,8 @@ from anthropic import (
     APIStatusError,
     APITimeoutError,
 )
+
+from dotenv import load_dotenv
 
 from fastapi import (
     FastAPI,
@@ -34,9 +37,24 @@ from backend.reports.generator import generate_report
 # Configuration
 # --------------------------------------------------
 
+load_dotenv("backend/.env")
+
 MAX_FILE_SIZE = 10 * 1024 * 1024
 PREVIEW_ROWS = 5
 CONFIDENCE_THRESHOLD = 0.85
+
+# Supports multiple frontend origins separated by commas.
+# Example:
+# ALLOWED_ORIGINS=http://localhost:3000,https://datatale.vercel.app
+
+ALLOWED_ORIGINS = [
+    origin.strip().rstrip("/")
+    for origin in os.getenv(
+        "ALLOWED_ORIGINS",
+        "http://localhost:3000",
+    ).split(",")
+    if origin.strip()
+]
 
 
 # --------------------------------------------------
@@ -64,7 +82,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=False,
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
@@ -454,24 +472,19 @@ async def download_dataset_report(
     No Claude request is made here.
     """
 
-    # Read the original CSV
     dataframe = await read_csv_file(file)
 
-    # Validate user-confirmed classifications
     confirmed_classifications = parse_classifications(
         classifications
     )
 
-    # Recalculate deterministic statistics
     statistics = calculate_confirmed_statistics(
         dataframe,
         confirmed_classifications,
     )
 
-    # Validate existing insights without calling Claude
     validated_insights = parse_report_insights(insights)
 
-    # Generate the PDF in memory
     pdf_bytes = generate_report(
         dataframe=dataframe,
         filename=file.filename,
@@ -480,7 +493,6 @@ async def download_dataset_report(
         insights=validated_insights,
     )
 
-    # Return the PDF as a downloadable file
     return StreamingResponse(
         BytesIO(pdf_bytes),
         media_type="application/pdf",
